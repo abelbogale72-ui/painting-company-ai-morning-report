@@ -1,0 +1,347 @@
+{
+  "name": "Painting Company - AI Morning Report Agent (No Pumble API Key Demo)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "painting-ops-morning-report",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "d58acaa3-f96d-40a1-9b33-190963f4b73e",
+      "name": "Webhook - Crew Updates",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        -6800
+      ],
+      "webhookId": "201a58a4-35a0-4678-946f-b3844b1baec6"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: {\n  generatedAt: new Date().toISOString(),\n  updates: [\n    {jobId:'JOB-104', customer:'Anderson Residence', status:'painting-in-progress', lastActivity:'2026-09-09T15:30:00Z', note:'Crew completed first coat in living room; returning tomorrow for trim.'},\n    {jobId:'JOB-118', customer:'Rivera Office', status:'stalled', lastActivity:'2026-09-08T10:00:00Z', note:'Waiting on stain-blocking primer; supplier delivery not confirmed.'},\n    {jobId:'JOB-121', customer:'Miller Residence', status:'weather-delay', lastActivity:'2026-09-09T13:00:00Z', note:'Exterior work paused due to rain; customer notified.'},\n    {jobId:'JOB-127', customer:'Green Kitchen', status:'customer-issue', lastActivity:'2026-09-09T16:15:00Z', note:'Customer requested a color change after sample approval; scope may change.'},\n    {jobId:'JOB-130', customer:'Hill Property', status:'safety', lastActivity:'2026-09-09T14:00:00Z', note:'Crew reported unstable ladder setup; work stopped pending supervisor review.'}\n  ]\n}}];"
+      },
+      "id": "9470865c-75e3-41dd-90bd-dda5a2a286e7",
+      "name": "Demo Data - Crew Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1440,
+        -6624
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "78bd5c30-9fcf-4ca0-83ff-9ae1a3b89cc6",
+      "name": "Schedule - 6 AM Daily",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1712,
+        -6656
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $json.body ?? $json;\nconst updates = body.updates ?? (Array.isArray(body) ? body : []);\nconst now = Date.now();\nconst normalized = updates.map(u => ({\n  jobId: u.jobId ?? 'UNKNOWN',\n  customer: u.customer ?? 'Unknown Customer',\n  status: String(u.status ?? '').trim().toLowerCase(),\n  lastActivity: u.lastActivity ?? null,\n  note: String(u.note ?? '').trim(),\n  hoursSinceActivity: u.lastActivity ? Math.round(((now - new Date(u.lastActivity).getTime())/3600000)*10)/10 : null\n}));\nreturn [{json:{generatedAt: body.generatedAt ?? new Date().toISOString(), updates: normalized}}];"
+      },
+      "id": "c9487191-9321-423c-8ec9-3abd807975b3",
+      "name": "Normalize & Filter Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1168,
+        -6704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw =\n  $json.output ??\n  $json.message?.content ??\n  $json.text ??\n  $json;\n\nlet text = String(raw).trim();\n\n// Remove markdown code fences if the model added them\ntext = text\n  .replace(/^```json\\s*/i, '')\n  .replace(/^```\\s*/i, '')\n  .replace(/\\s*```$/i, '')\n  .trim();\n\n// Extract the JSON object\nconst start = text.indexOf('{');\nconst end = text.lastIndexOf('}');\n\nif (start === -1 || end === -1 || end <= start) {\n  throw new Error('AI response does not contain a JSON object.');\n}\n\ntext = text.slice(start, end + 1);\n\nlet report;\n\ntry {\n  report = JSON.parse(text);\n} catch (error) {\n  throw new Error(\n    'AI returned invalid JSON: ' + error.message\n  );\n}\n\n// Required fields\nconst required = [\n  'summary',\n  'jobsMoved',\n  'stalledJobs',\n  'needsAttention',\n  'escalationItems',\n  'metrics'\n];\n\nfor (const key of required) {\n  if (!(key in report)) {\n    throw new Error('Missing report field: ' + key);\n  }\n}\n\n// Ensure arrays\nreport.jobsMoved = Array.isArray(report.jobsMoved)\n  ? report.jobsMoved\n  : [];\n\nreport.stalledJobs = Array.isArray(report.stalledJobs)\n  ? report.stalledJobs\n  : [];\n\nreport.needsAttention = Array.isArray(report.needsAttention)\n  ? report.needsAttention\n  : [];\n\nreport.escalationItems = Array.isArray(report.escalationItems)\n  ? report.escalationItems\n  : [];\n\n// Get original normalized source data\nconst source =\n  $('Normalize & Filter Updates').item.json;\n\nconst updates = Array.isArray(source.updates)\n  ? source.updates\n  : [];\n\n// Map original jobs\nconst jobMap = {};\n\nfor (const job of updates) {\n  if (job.jobId) {\n    jobMap[job.jobId] = job;\n  }\n}\n\n// Primary classification priority\nconst categories = [\n  'escalationItems',\n  'stalledJobs',\n  'needsAttention',\n  'jobsMoved'\n];\n\n// Prevent duplicates\nconst assigned = new Set();\n\nfor (const category of categories) {\n  const uniqueItems = [];\n\n  for (const item of report[category]) {\n    if (!item || !item.jobId) {\n      continue;\n    }\n\n    const jobId = item.jobId;\n\n    // Skip duplicate classifications\n    if (assigned.has(jobId)) {\n      continue;\n    }\n\n    const original = jobMap[jobId] || {};\n\n    uniqueItems.push({\n      ...item,\n      jobId,\n      customer:\n        original.customer ??\n        item.customer ??\n        'Unknown Customer',\n      hoursSinceActivity:\n        original.hoursSinceActivity ??\n        item.hoursSinceActivity ??\n        null\n    });\n\n    assigned.add(jobId);\n  }\n\n  report[category] = uniqueItems;\n}\n\n// Fill fields from original source data\n\nfor (const item of report.jobsMoved) {\n  const original = jobMap[item.jobId] || {};\n\n  item.customer =\n    original.customer ??\n    item.customer ??\n    'Unknown Customer';\n\n  item.update =\n    item.update ??\n    original.note ??\n    'No update';\n\n  item.hoursSinceActivity =\n    original.hoursSinceActivity ??\n    item.hoursSinceActivity ??\n    null;\n}\n\nfor (const item of report.stalledJobs) {\n  const original = jobMap[item.jobId] || {};\n\n  item.customer =\n    original.customer ??\n    item.customer ??\n    'Unknown Customer';\n\n  item.reason =\n    item.reason ??\n    original.note ??\n    'No reason provided';\n\n  item.hoursSinceActivity =\n    original.hoursSinceActivity ??\n    item.hoursSinceActivity ??\n    null;\n}\n\nfor (const item of report.needsAttention) {\n  const original = jobMap[item.jobId] || {};\n\n  item.customer =\n    original.customer ??\n    item.customer ??\n    'Unknown Customer';\n\n  item.reason =\n    item.reason ??\n    original.note ??\n    'No reason provided';\n\n  item.recommendedAction =\n    item.recommendedAction ??\n    'Review required';\n}\n\nfor (const item of report.escalationItems) {\n  const original = jobMap[item.jobId] || {};\n\n  item.customer =\n    original.customer ??\n    item.customer ??\n    'Unknown Customer';\n\n  item.reason =\n    item.reason ??\n    original.note ??\n    'No reason provided';\n\n  item.recommendedAction =\n    item.recommendedAction ??\n    'Immediate Project Manager review required';\n\n  item.priority =\n    item.priority ??\n    'HIGH';\n\n  item.hoursSinceActivity =\n    original.hoursSinceActivity ??\n    item.hoursSinceActivity ??\n    null;\n}\n\n// Recalculate metrics from actual final classifications\nreport.metrics = {\n  jobsReviewed: updates.length,\n  jobsMoved: report.jobsMoved.length,\n  stalled: report.stalledJobs.length,\n  needsAttention: report.needsAttention.length,\n  escalations: report.escalationItems.length\n};\n\n// Build readable report\nconst lines = [];\n\nlines.push('# Painting Operations Morning Report');\nlines.push('');\nlines.push(\n  'Summary: ' +\n  (report.summary || 'No summary provided.')\n);\n\nlines.push('');\nlines.push(\n  'Metrics: ' +\n  report.metrics.jobsReviewed +\n  ' jobs reviewed | ' +\n  report.metrics.jobsMoved +\n  ' moved | ' +\n  report.metrics.stalled +\n  ' stalled | ' +\n  report.metrics.needsAttention +\n  ' attention | ' +\n  report.metrics.escalations +\n  ' escalations'\n);\n\n// Jobs moved\nlines.push('');\nlines.push('## 1) Jobs Moved');\n\nif (report.jobsMoved.length === 0) {\n  lines.push('- None reported');\n} else {\n  for (const item of report.jobsMoved) {\n    lines.push(\n      '- ' +\n      item.jobId +\n      ' - ' +\n      item.customer +\n      ': ' +\n      item.update\n    );\n  }\n}\n\n// Stalled\nlines.push('');\nlines.push('## 2) Stalled Jobs');\n\nif (report.stalledJobs.length === 0) {\n  lines.push('- None');\n} else {\n  for (const item of report.stalledJobs) {\n    lines.push(\n      '- ' +\n      item.jobId +\n      ' - ' +\n      item.customer +\n      ': ' +\n      item.reason +\n      ' (' +\n      (item.hoursSinceActivity ?? '?') +\n      'h)'\n    );\n  }\n}\n\n// Attention\nlines.push('');\nlines.push('## 3) Needs Attention');\n\nif (report.needsAttention.length === 0) {\n  lines.push('- None');\n} else {\n  for (const item of report.needsAttention) {\n    lines.push(\n      '- ' +\n      item.jobId +\n      ' - ' +\n      item.customer +\n      ': ' +\n      item.reason +\n      ' | Action: ' +\n      item.recommendedAction\n    );\n  }\n}\n\n// Escalations\nlines.push('');\nlines.push('## 4) Escalation Items');\n\nif (report.escalationItems.length === 0) {\n  lines.push('- None');\n} else {\n  for (const item of report.escalationItems) {\n    lines.push(\n      '- [' +\n      item.priority +\n      '] ' +\n      item.jobId +\n      ' - ' +\n      item.customer +\n      ': ' +\n      item.reason +\n      ' | Action: ' +\n      item.recommendedAction\n    );\n  }\n}\n\nreturn [\n  {\n    json: {\n      report,\n      formattedReport: lines.join('\\n'),\n      generatedAt: new Date().toISOString()\n    }\n  }\n];"
+      },
+      "id": "f16e0f7f-7b42-4955-9541-27c93bb4e0bc",
+      "name": "Validate & Format Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -656,
+        -6736
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ Number($json.report.metrics.escalations) }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "634c80fa-e569-4520-90d1-bf8c8661f499",
+      "name": "Escalation Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -464,
+        -6704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $('Validate & Format Report').item.json;\nconst report = source.report;\n\nreturn [{\n  json: {\n    status: 'AUDITED',\n    loggedAt: new Date().toISOString(),\n    generatedAt: source.generatedAt,\n    formattedReport: source.formattedReport,\n    report,\n    metrics: report.metrics,\n    escalationTriggered: Number(report.metrics?.escalations ?? 0) > 0\n  }\n}];"
+      },
+      "id": "3730e03c-8b0c-442e-a494-f7231e5d5d66",
+      "name": "Audit Log Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -48,
+        -6704
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const x=$json; return [{json:{status:'READY', generatedAt:x.generatedAt, formattedReport:x.formattedReport, escalationRequired:(x.report?.escalationItems?.length??0)>0, report:x.report}}];"
+      },
+      "id": "976f42fc-635c-43dd-899a-ca9a46f92f9e",
+      "name": "Final Portfolio Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        176,
+        -6704
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Analyze these painting job updates:\n\n{{ JSON.stringify($json.updates) }}\n\nReturn only valid JSON.",
+        "options": {
+          "systemMessage": "You classify painting jobs.\n\nAssign each job to ONE category:\nEscalation > Stalled > Attention > Moved.\n\nEscalation = safety or major scope change.\nStalled = no activity for 24+ hours.\nAttention = customer, weather, material, or scheduling issue.\nMoved = measurable progress.\n\nReturn ONLY JSON.\nNo explanation.\nNo markdown.\nNo text before or after JSON.\n\nUse exactly this structure:\n\n{\n  \"summary\": \"\",\n  \"jobsMoved\": [],\n  \"stalledJobs\": [],\n  \"needsAttention\": [],\n  \"escalationItems\": [],\n  \"metrics\": {\n    \"jobsReviewed\": 0,\n    \"jobsMoved\": 0,\n    \"stalled\": 0,\n    \"needsAttention\": 0,\n    \"escalations\": 0\n  }\n}\n\nNever duplicate a job.\nUse only the supplied data."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -944,
+        -6720
+      ],
+      "id": "3f7c6766-7a30-4eee-a4fe-944b897fd7a5",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "allam-2-7b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        -1024,
+        -6480
+      ],
+      "id": "3cbab3d3-85ca-4aae-8bdc-e2ad49725c23",
+      "name": "Groq Chat Model",
+      "credentials": {
+        "groqApi": {
+          "id": "mCnhA083ZtK8lESW",
+          "name": "Groq account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const x = $json;\n\nreturn [{\n  json: {\n    ...x,\n    route: 'ESCALATION',\n    alertLevel: 'HIGH',\n    action: 'Immediate Project Manager review required.'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -6800
+      ],
+      "id": "6a3ccd86-5ee4-4c87-918a-629820e3e928",
+      "name": "Escalation Alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "const x = $json;\n\nreturn [{\n  json: {\n    ...x,\n    route: 'NORMAL',\n    alertLevel: 'NONE',\n    action: 'No immediate escalation required.'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -6624
+      ],
+      "id": "fa6e5d06-7ef3-4dad-9da8-8b7d244503c5",
+      "name": "Normal Report"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Crew Updates": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Filter Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Demo Data - Crew Updates": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Filter Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule - 6 AM Daily": {
+      "main": [
+        [
+          {
+            "node": "Demo Data - Crew Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Filter Updates": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Format Report": {
+      "main": [
+        [
+          {
+            "node": "Escalation Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalation Check": {
+      "main": [
+        [
+          {
+            "node": "Escalation Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normal Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Log Payload": {
+      "main": [
+        [
+          {
+            "node": "Final Portfolio Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate & Format Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalation Alert": {
+      "main": [
+        [
+          {
+            "node": "Audit Log Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normal Report": {
+      "main": [
+        [
+          {
+            "node": "Audit Log Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "28095332-7780-4f78-85d2-c70b4f60c28f",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "21ffbc9fe4d682285230f68e6ce0a88bc6c175acfc69677e5dd2dfde9641341b"
+  },
+  "nodeGroups": [],
+  "id": "tYsjhc18qtEYtqgX",
+  "tags": []
+}
